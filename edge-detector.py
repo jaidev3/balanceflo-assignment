@@ -1,0 +1,181 @@
+import io
+import json
+from typing import Tuple
+
+import cv2
+import numpy as np
+from PIL import Image
+import streamlit as st
+
+# Import separated modules
+from data_models import EdgeResult
+from image_utils import pil_to_cv, cv_to_rgb, resize_max_width, preprocess_for_edges
+from edge_detection_core import (
+    detect_straight_edge,
+    detect_curved_edge,
+    choose_best_edge,
+    draw_edge_annotation,
+    build_json
+)
+
+
+# =========================
+# Streamlit UI
+# =========================
+st.set_page_config(page_title="Desk Edge Detector", page_icon="🧭", layout="wide")
+st.title("🧭 User-Facing Desk Edge Detection")
+st.caption("Precisely detect and retrieve coordinates of the desk edge facing the user (optimized for office work desks).")
+
+with st.sidebar:
+    st.header("User-Facing Edge Detection Settings")
+    st.caption("Optimized for detecting desk edges facing the user")
+    use_clahe = st.checkbox("Use CLAHE (contrast boost)", value=True)
+    min_line_len_ratio = st.slider("Min line length (ratio of width)", 0.05, 0.6, 0.25, 0.05)
+    angle_tol = st.slider("Horizontal angle tolerance (deg)", 2, 25, 8, 1)
+    bottom_mask_ratio = st.slider("User-facing zone (bottom ratio)", 0.4, 0.9, 0.7, 0.05)
+    approx_eps_ratio = st.slider("Contour smoothing (eps ratio)", 0.003, 0.05, 0.008, 0.001)
+    resample_points = st.slider("Curve detail points", 8, 200, 35, 1)
+
+    st.header("Debug Views")
+    show_gray = st.checkbox("Show grayscale", value=True)
+    show_edges = st.checkbox("Show Canny edges", value=True)
+    show_hough_overlay = st.checkbox("Show Hough lines overlay", value=True)
+    show_contour_overlay = st.checkbox("Show contour overlay", value=True)
+
+uploaded = st.file_uploader("Upload an office desk image (PNG/JPG/WEBP)", type=["png","jpg","jpeg","webp"])
+
+if uploaded:
+    image = Image.open(uploaded).convert("RGB")
+    img_bgr = pil_to_cv(image)
+    img_bgr = resize_max_width(img_bgr, 1280)
+
+    gray, blurred, edges, debug = preprocess_for_edges(img_bgr, use_clahe=use_clahe)
+
+    # Run edge detection algorithms
+    straight_res = detect_straight_edge(
+        img_bgr, edges,
+        min_line_len_ratio=min_line_len_ratio,
+        angle_tolerance_deg=angle_tol,
+        user_facing_zone=0.6  # Focus on bottom 60% for user-facing edges
+    )
+
+    curved_res = detect_curved_edge(
+        img_bgr, edges,
+        bottom_mask_ratio=bottom_mask_ratio,
+        approx_eps_ratio=approx_eps_ratio,
+        resample_points=resample_points
+    )
+
+    result = choose_best_edge(straight_res, curved_res)
+
+    col1, col2 = st.columns([2,1])
+
+    with col1:
+        st.subheader("Annotated Result")
+        if result:
+            annotated = draw_edge_annotation(img_bgr, result)
+            st.image(cv_to_rgb(annotated), caption=f"Detected edge ({result.method}, score={result.score:.3f})", use_container_width=True)
+
+            # JSON output
+            out_json = build_json(result, img_bgr.shape)
+            st.subheader("Retrieved Coordinates (JSON)")
+            st.code(json.dumps(out_json, indent=2), language="json")
+
+            # Download buttons
+            _, buf_img = cv2.imencode(".png", annotated)
+            st.download_button(
+                "Download Annotated Image (PNG)",
+                data=buf_img.tobytes(),
+                file_name="annotated_edge.png",
+                mime="image/png"
+            )
+
+            st.download_button(
+                "Download Coordinates (JSON)",
+                data=json.dumps(out_json).encode("utf-8"),
+                file_name="edge_coordinates.json",
+                mime="application/json"
+            )
+        else:
+            st.warning("No user-facing desk edge detected. Try adjusting sidebar settings or ensure the image clearly shows the desk edge closest to where a user would sit.")
+
+    with col2:
+        st.subheader("Debug Visualizations")
+        if show_gray:
+            st.image(debug["gray"], caption="Grayscale", use_container_width=True, clamp=True)
+        if show_edges:
+            st.image(debug["edges"], caption="Canny Edges", use_container_width=True, clamp=True)
+
+        # Debug overlay for Hough lines
+        if show_hough_overlay:
+            overlay = img_bgr.copy()
+            H, W = img_bgr.shape[:2]
+            
+            # Match the user_facing_zone parameter
+            user_zone_start = int(H * (1 - 0.6))
+            user_zone_edges = edges.copy()
+            user_zone_edges[:user_zone_start, :] = 0
+            
+            lines = cv2.HoughLinesP(user_zone_edges, 1, np.pi/180, 50,
+                                    minLineLength=max(20, int(min_line_len_ratio * W)),
+                                    maxLineGap=30)
+            if lines is not None:
+                for L in lines:
+                    x1, y1, x2, y2 = L[0]
+                    dx, dy = (x2 - x1), (y2 - y1)
+                    angle = np.degrees(np.arctan2(dy, dx))
+                    # Green for candidates, orange for others
+                    color = (0, 255, 0) if abs(angle) <= angle_tol else (0, 200, 255)
+                    cv2.line(overlay, (x1, y1), (x2, y2), color, 2)
+            
+            # Draw user zone boundary
+            cv2.line(overlay, (0, user_zone_start), (W, user_zone_start), (255, 255, 0), 2)
+            st.image(cv_to_rgb(overlay), caption="User-Facing Zone Hough Lines (Green=Candidates)", use_container_width=True)
+
+        # Debug overlay for contours
+        if show_contour_overlay:
+            H, W = edges.shape[:2]
+            
+            # Create masks for user-facing zone
+            mask = np.zeros_like(edges)
+            y0 = int(H * (1 - bottom_mask_ratio))
+            mask[y0:H, :] = 255
+            
+            # Center bias mask
+            center_bias_mask = np.zeros_like(edges)
+            center_x = W // 2
+            center_width = int(W * 0.8)
+            x_start = max(0, center_x - center_width // 2)
+            x_end = min(W, center_x + center_width // 2)
+            center_bias_mask[:, x_start:x_end] = 255
+            
+            # Combine masks and apply morphology
+            combined_mask = cv2.bitwise_and(mask, center_bias_mask)
+            masked_edges = cv2.bitwise_and(edges, combined_mask)
+            
+            # Morphological operations
+            kernel_close = np.ones((7,7), np.uint8)
+            kernel_dilate = np.ones((3,3), np.uint8)
+            closed = cv2.morphologyEx(masked_edges, cv2.MORPH_CLOSE, kernel_close, iterations=2)
+            dilated = cv2.dilate(closed, kernel_dilate, iterations=1)
+            
+            overlay2 = img_bgr.copy()
+            contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+            if contours:
+                # Draw contours with different colors based on size
+                for i, cnt in enumerate(contours):
+                    x, y, w, h = cv2.boundingRect(cnt)
+                    if w >= W * 0.15 and h >= 5:  # Significant contours
+                        cv2.drawContours(overlay2, [cnt], -1, (0, 255, 0), 3)  # Green for candidates
+                    else:
+                        cv2.drawContours(overlay2, [cnt], -1, (100, 100, 100), 1)  # Gray for small ones
+            
+            # Draw zone boundaries
+            cv2.line(overlay2, (0, y0), (W, y0), (255, 255, 0), 2)  # Bottom zone
+            cv2.line(overlay2, (x_start, 0), (x_start, H), (255, 0, 255), 1)  # Center bias left
+            cv2.line(overlay2, (x_end, 0), (x_end, H), (255, 0, 255), 1)  # Center bias right
+
+            st.image(cv_to_rgb(overlay2), caption="User-Facing Contours (Green=Candidates, Yellow=Zone)", use_container_width=True)
+
+else:
+    st.info("Upload an image to begin. Use the sidebar to tune detection parameters.")

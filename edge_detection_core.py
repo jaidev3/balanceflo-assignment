@@ -1,0 +1,297 @@
+import cv2
+import numpy as np
+from typing import Tuple, Optional, Dict
+from data_models import EdgeResult
+
+
+def sample_edge_strength(edges: np.ndarray, p1: Tuple[int,int], p2: Tuple[int,int], samples: int = 50) -> float:
+    """Average edge magnitude along the line in the Canny map."""
+    x1, y1 = p1
+    x2, y2 = p2
+    vals = []
+    for t in np.linspace(0, 1, samples):
+        x = int(round(x1 + (x2 - x1) * t))
+        y = int(round(y1 + (y2 - y1) * t))
+        if 0 <= y < edges.shape[0] and 0 <= x < edges.shape[1]:
+            vals.append(edges[y, x])
+    return float(np.mean(vals) if vals else 0.0)
+
+
+def detect_straight_edge(img_bgr: np.ndarray,
+                         edges: np.ndarray,
+                         min_line_len_ratio: float = 0.2,
+                         angle_tolerance_deg: float = 10.0,
+                         user_facing_zone: float = 0.6
+                         ) -> Optional[EdgeResult]:
+    """
+    Use Probabilistic Hough to find near-horizontal long segments that represent
+    the user-facing desk edge. Focus on bottom portion of image.
+    Returns best EdgeResult or None.
+    """
+    H, W = edges.shape[:2]
+    min_line_len = max(20, int(min_line_len_ratio * W))
+
+    # Focus on user-facing zone (bottom portion of image)
+    user_zone_start = int(H * (1 - user_facing_zone))
+    user_zone_edges = edges.copy()
+    user_zone_edges[:user_zone_start, :] = 0  # Zero out upper portion
+
+    lines = cv2.HoughLinesP(user_zone_edges, rho=1, theta=np.pi/180, threshold=50,
+                            minLineLength=min_line_len, maxLineGap=30)
+    if lines is None:
+        return None
+
+    # Scoring: prioritize user-facing characteristics
+    best = None
+    best_score = -1.0
+
+    for line in lines:
+        x1, y1, x2, y2 = line[0]
+        dx, dy = (x2 - x1), (y2 - y1)
+        angle = np.degrees(np.arctan2(dy, dx))
+        
+        # Must be near-horizontal (user-facing desk edges are typically horizontal)
+        if abs(angle) > angle_tolerance_deg:
+            continue
+
+        length = np.hypot(dx, dy)
+        length_norm = length / float(W)
+
+        # User-facing position score: prefer edges in lower 2/3 of image
+        y_mean = (y1 + y2) / 2.0
+        y_pos_norm = y_mean / float(H)
+        
+        # Boost score for edges in the "user zone" (bottom portion)
+        user_zone_bonus = 1.0 if y_mean > user_zone_start else 0.5
+
+        # Width coverage: user-facing edges often span significant width
+        width_coverage = length / float(W)
+        width_bonus = min(1.0, width_coverage * 2)  # Bonus for wider edges
+
+        # Edge strength: sample points along the segment
+        strength = sample_edge_strength(user_zone_edges, (x1, y1), (x2, y2))
+        strength_norm = strength / 255.0
+
+        # Horizontal continuity: check if edge extends across significant width
+        x_span = abs(x2 - x1) / float(W)
+        continuity_bonus = min(1.0, x_span * 1.5)
+
+        # Enhanced composite score for user-facing edge detection
+        score = (0.35 * length_norm + 
+                0.25 * y_pos_norm + 
+                0.15 * strength_norm + 
+                0.15 * continuity_bonus +
+                0.10 * width_bonus) * user_zone_bonus
+
+        if score > best_score:
+            best_score = score
+            best = (x1, y1, x2, y2)
+
+    if best is None:
+        return None
+
+    x1, y1, x2, y2 = best
+    return EdgeResult(
+        edge_type="line",
+        points=[(int(x1), int(y1)), (int(x2), int(y2))],
+        score=float(best_score),
+        method="hough_straight",
+        metadata={
+            "angle_tolerance_deg": angle_tolerance_deg,
+            "min_line_len_ratio": min_line_len_ratio,
+            "user_facing_zone": user_facing_zone
+        }
+    )
+
+
+def detect_curved_edge(img_bgr: np.ndarray,
+                       edges: np.ndarray,
+                       bottom_mask_ratio: float = 0.65,
+                       approx_eps_ratio: float = 0.01,
+                       resample_points: int = 40) -> Optional[EdgeResult]:
+    """
+    Focus on bottom region to find curved user-facing desk edges.
+    Extract the frontmost envelope (max y by x) representing the user-side edge.
+    Returns best EdgeResult or None.
+    """
+    H, W = edges.shape[:2]
+
+    # Enhanced mask for user-facing zone (bottom portion)
+    mask = np.zeros_like(edges)
+    y0 = int(H * (1 - bottom_mask_ratio))
+    mask[y0:H, :] = 255
+    
+    # Additional central bias - user typically sits in front of desk center
+    center_bias_mask = np.zeros_like(edges)
+    center_x = W // 2
+    center_width = int(W * 0.8)  # Focus on central 80% of image width
+    x_start = max(0, center_x - center_width // 2)
+    x_end = min(W, center_x + center_width // 2)
+    center_bias_mask[:, x_start:x_end] = 255
+    
+    # Combine masks
+    combined_mask = cv2.bitwise_and(mask, center_bias_mask)
+    masked_edges = cv2.bitwise_and(edges, combined_mask)
+
+    # Enhanced morphology to better connect desk edge segments
+    kernel_close = np.ones((7,7), np.uint8)  # Larger kernel for better connection
+    kernel_dilate = np.ones((3,3), np.uint8)
+    closed = cv2.morphologyEx(masked_edges, cv2.MORPH_CLOSE, kernel_close, iterations=2)
+    dilated = cv2.dilate(closed, kernel_dilate, iterations=1)
+
+    contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+    if not contours:
+        return None
+
+    # Enhanced scoring for user-facing desk edges
+    best = None
+    best_score = -1.0
+    for cnt in contours:
+        x, y, w, h = cv2.boundingRect(cnt)
+        
+        # Filter out very small contours
+        if w < W * 0.15 or h < 5:  # Must be reasonably wide and tall
+            continue
+            
+        width_norm = w / float(W)
+        height_norm = h / float(H)
+
+        # Vertical position: prefer lower edges (user-facing)
+        y_bottom = (y + h) / float(H)
+        
+        # Horizontal span: user-facing edges often span significant width
+        x_center = (x + w/2) / float(W)
+        center_distance = abs(x_center - 0.5)  # Distance from image center
+        center_score = 1.0 - center_distance  # Higher score for more centered edges
+        
+        # Aspect ratio: user-facing edges tend to be wider than tall
+        aspect_ratio = w / max(h, 1)
+        aspect_score = min(1.0, aspect_ratio / 5.0)  # Bonus for wide, shallow contours
+        
+        # Area coverage relative to user zone
+        area = cv2.contourArea(cnt)
+        area_norm = area / (W * H * bottom_mask_ratio)
+        
+        # Enhanced composite score for user-facing curved edges
+        score = (0.30 * width_norm +           # Width coverage
+                0.25 * y_bottom +              # Lower position
+                0.20 * center_score +          # Central positioning  
+                0.15 * aspect_score +          # Wide aspect ratio
+                0.10 * min(1.0, area_norm * 10))  # Reasonable area
+
+        if score > best_score:
+            best_score = score
+            best = cnt
+
+    if best is None:
+        return None
+
+    # Approximate contour to reduce noise
+    perim = cv2.arcLength(best, closed=True)
+    eps = max(2.0, approx_eps_ratio * perim)
+    approx = cv2.approxPolyDP(best, eps, closed=False)
+
+    # Extract the "user-facing envelope": for each x, take max y (closest to user)
+    pts = approx.reshape(-1, 2)
+    # Sort by x coordinate
+    pts = pts[np.argsort(pts[:, 0])]
+
+    # Group by x (pixel columns) and keep max y (frontmost point)
+    envelope = {}
+    for (x, y) in pts:
+        if x not in envelope or y > envelope[x]:
+            envelope[x] = y
+
+    # Sort x coordinates and form ordered polyline
+    xs_sorted = sorted(envelope.keys())
+    poly = [(int(x), int(envelope[x])) for x in xs_sorted]
+    
+    # Ensure minimum width coverage for user-facing edge
+    if len(poly) < 2 or (poly[-1][0] - poly[0][0]) < W * 0.2:
+        return None
+
+    # Downsample/resample to fixed number of points
+    if len(poly) > resample_points:
+        idxs = np.round(np.linspace(0, len(poly) - 1, resample_points)).astype(int)
+        poly = [poly[i] for i in idxs]
+
+    return EdgeResult(
+        edge_type="polyline",
+        points=poly,
+        score=float(best_score),
+        method="contour_curved",
+        metadata={
+            "bottom_mask_ratio": bottom_mask_ratio,
+            "approx_eps_ratio": approx_eps_ratio,
+            "resample_points": resample_points,
+            "center_bias_applied": True
+        }
+    )
+
+
+def choose_best_edge(straight_res: Optional[EdgeResult],
+                     curved_res: Optional[EdgeResult]) -> Optional[EdgeResult]:
+    """
+    Enhanced chooser for user-facing desk edges. Prioritizes edges that are
+    more likely to represent the user-facing side of the desk.
+    """
+    if straight_res and not curved_res:
+        return straight_res
+    if curved_res and not straight_res:
+        return curved_res
+    if not straight_res and not curved_res:
+        return None
+
+    # Enhanced selection logic for user-facing edges
+    straight_score = straight_res.score
+    curved_score = curved_res.score
+    
+    # Apply user-facing bonuses
+    # Straight edges are often more reliable for user-facing desk detection
+    straight_bonus = 1.1 if straight_score > 0.3 else 1.0
+    
+    # Check if straight edge spans good width (user-facing characteristic)
+    if straight_res.points and len(straight_res.points) >= 2:
+        x1, x2 = straight_res.points[0][0], straight_res.points[1][0]
+        width_span = abs(x2 - x1)
+        # Bonus for edges that span significant width
+        if 'user_facing_zone' in straight_res.metadata:
+            straight_bonus *= 1.05
+    
+    # Curved edges get bonus if they show good central positioning
+    curved_bonus = 1.0
+    if curved_res.metadata.get('center_bias_applied', False):
+        curved_bonus = 1.03
+    
+    adjusted_straight = straight_score * straight_bonus
+    adjusted_curved = curved_score * curved_bonus
+    
+    # If straight is competitive (within 15%), prefer it for user-facing detection
+    if adjusted_straight >= 0.85 * adjusted_curved:
+        return straight_res
+    return curved_res
+
+
+def draw_edge_annotation(img_bgr: np.ndarray, result: EdgeResult) -> np.ndarray:
+    """Draw edge annotation on the image."""
+    out = img_bgr.copy()
+    if result.edge_type == "line":
+        (x1, y1), (x2, y2) = result.points
+        cv2.line(out, (x1, y1), (x2, y2), (255, 0, 0), 4)  # blue
+    else:
+        pts = np.array(result.points, dtype=np.int32).reshape(-1, 1, 2)
+        cv2.polylines(out, [pts], isClosed=False, color=(255, 0, 0), thickness=4)
+    return out
+
+
+def build_json(result: EdgeResult, img_shape: Tuple[int, int, int]) -> Dict:
+    """Build JSON output from edge detection result."""
+    H, W = img_shape[:2]
+    return {
+        "edge_type": result.edge_type,
+        "points": result.points,
+        "score": round(result.score, 5),
+        "method": result.method,
+        "image_size": {"width": W, "height": H},
+        "metadata": result.metadata
+    }
