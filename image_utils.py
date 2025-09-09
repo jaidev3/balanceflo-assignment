@@ -1,7 +1,7 @@
 import cv2
 import numpy as np
 from PIL import Image
-from typing import Tuple, Dict
+from typing import Tuple, Dict, Optional
 
 
 def pil_to_cv(img_pil: Image.Image) -> np.ndarray:
@@ -24,16 +24,35 @@ def resize_max_width(img_bgr: np.ndarray, max_w: int = 1280) -> np.ndarray:
     return cv2.resize(img_bgr, new_size, interpolation=cv2.INTER_AREA)
 
 
-def preprocess_for_edges(img_bgr: np.ndarray, use_clahe: bool = True) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Dict]:
-    """Preprocess image for edge detection.
+def preprocess_for_edges(img_bgr: np.ndarray, use_clahe: bool = True, 
+                         use_segmentation: bool = False) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Dict]:
+    """Preprocess image for edge detection with optional semantic segmentation.
+    
+    Args:
+        img_bgr: Input image in BGR format
+        use_clahe: Whether to apply CLAHE contrast enhancement
+        use_segmentation: Whether to apply semantic segmentation to remove person/chair noise
     
     Returns:
         gray: Grayscale image
         blurred: Blurred image
         edges: Canny edge detection result
-        debug: Dictionary with debug information
+        debug: Dictionary with debug information including segmentation mask
     """
-    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+    processed_img = img_bgr.copy()
+    segmentation_mask = None
+    
+    # Apply semantic segmentation if enabled
+    if use_segmentation:
+        try:
+            from semantic_segmentation import remove_person_chair_noise
+            processed_img, segmentation_mask = remove_person_chair_noise(img_bgr, use_segmentation=True)
+        except ImportError:
+            print("Warning: Semantic segmentation not available. Install torch and torchvision.")
+        except Exception as e:
+            print(f"Warning: Semantic segmentation failed: {e}")
+    
+    gray = cv2.cvtColor(processed_img, cv2.COLOR_BGR2GRAY)
     
     if use_clahe:
         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
@@ -45,7 +64,10 @@ def preprocess_for_edges(img_bgr: np.ndarray, use_clahe: bool = True) -> Tuple[n
     debug = {
         "gray": gray,
         "blurred": blurred,
-        "edges": edges
+        "edges": edges,
+        "processed_img": processed_img,
+        "segmentation_mask": segmentation_mask,
+        "segmentation_enabled": use_segmentation
     }
     
     return gray, blurred, edges, debug

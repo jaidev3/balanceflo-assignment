@@ -22,16 +22,23 @@ from edge_detection_core import (
 # =========================
 # Streamlit UI
 # =========================
-st.set_page_config(page_title="Desk Edge Detector", page_icon="🧭", layout="wide")
-st.title("🧭 User-Facing Desk Edge Detection")
-st.caption("Precisely detect and retrieve coordinates of the desk edge facing the user (optimized for office work desks).")
+st.set_page_config(page_title="Enhanced Desk Edge Detector", page_icon="🧭", layout="wide")
+st.title("🧭 Enhanced Desk Edge Detection")
+st.caption("AI-powered desk edge detection that works with people in the scene and various camera angles. Uses semantic segmentation to remove person/chair noise and flexible algorithms for robust detection.")
 
 with st.sidebar:
-    st.header("User-Facing Edge Detection Settings")
-    st.caption("Optimized for detecting desk edges facing the user")
+    st.header("Enhanced Edge Detection Settings")
+    st.caption("Robust detection for various camera angles and scenes with people")
+    
+    st.subheader("🤖 AI Enhancement")
+    use_segmentation = st.checkbox("Use AI person/chair removal", value=True, 
+                                  help="Uses DeepLabv3 to remove people and chairs from the image before edge detection")
+    
+    st.subheader("📐 Edge Detection")
     use_clahe = st.checkbox("Use CLAHE (contrast boost)", value=True)
     min_line_len_ratio = st.slider("Min line length (ratio of width)", 0.05, 0.6, 0.25, 0.05)
-    angle_tol = st.slider("Horizontal angle tolerance (deg)", 2, 25, 8, 1)
+    angle_tol = st.slider("Angle tolerance (deg)", 10, 80, 60, 5, 
+                         help="Higher values allow detection of diagonal desk edges from angled camera views")
     bottom_mask_ratio = st.slider("User-facing zone (bottom ratio)", 0.4, 0.9, 0.7, 0.05)
     approx_eps_ratio = st.slider("Contour smoothing (eps ratio)", 0.003, 0.05, 0.008, 0.001)
     resample_points = st.slider("Curve detail points", 8, 200, 35, 1)
@@ -49,7 +56,7 @@ if uploaded:
     img_bgr = pil_to_cv(image)
     img_bgr = resize_max_width(img_bgr, 1280)
 
-    gray, blurred, edges, debug = preprocess_for_edges(img_bgr, use_clahe=use_clahe)
+    gray, blurred, edges, debug = preprocess_for_edges(img_bgr, use_clahe=use_clahe, use_segmentation=use_segmentation)
 
     # Run edge detection algorithms
     straight_res = detect_straight_edge(
@@ -97,10 +104,17 @@ if uploaded:
                 mime="application/json"
             )
         else:
-            st.warning("No user-facing desk edge detected. Try adjusting sidebar settings or ensure the image clearly shows the desk edge closest to where a user would sit.")
+            st.warning("No desk edge detected. Try adjusting sidebar settings, enabling AI person/chair removal, or ensure the image clearly shows a desk edge.")
 
     with col2:
         st.subheader("Debug Visualizations")
+        
+        # Show segmentation results if enabled
+        if use_segmentation and debug.get("segmentation_mask") is not None:
+            st.image(cv_to_rgb(debug["processed_img"]), caption="AI-Cleaned Image (Person/Chair Removed)", use_container_width=True)
+            mask_viz = (debug["segmentation_mask"] * 255).astype(np.uint8)
+            st.image(mask_viz, caption="Person/Chair Detection Mask", use_container_width=True, clamp=True)
+        
         if show_gray:
             st.image(debug["gray"], caption="Grayscale", use_container_width=True, clamp=True)
         if show_edges:

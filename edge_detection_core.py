@@ -20,7 +20,7 @@ def sample_edge_strength(edges: np.ndarray, p1: Tuple[int,int], p2: Tuple[int,in
 def detect_straight_edge(img_bgr: np.ndarray,
                          edges: np.ndarray,
                          min_line_len_ratio: float = 0.2,
-                         angle_tolerance_deg: float = 10.0,
+                         angle_tolerance_deg: float = 60.0,
                          user_facing_zone: float = 0.6
                          ) -> Optional[EdgeResult]:
     """
@@ -50,38 +50,21 @@ def detect_straight_edge(img_bgr: np.ndarray,
         dx, dy = (x2 - x1), (y2 - y1)
         angle = np.degrees(np.arctan2(dy, dx))
         
-        # Must be near-horizontal (user-facing desk edges are typically horizontal)
-        if abs(angle) > angle_tolerance_deg:
+        # Allow most non-vertical lines (flexible for various camera angles)
+        # Filter out near-vertical lines which are rarely desk edges
+        if abs(angle) > angle_tolerance_deg and abs(angle) < (180 - angle_tolerance_deg):
             continue
 
         length = np.hypot(dx, dy)
-        length_norm = length / float(W)
-
-        # User-facing position score: prefer edges in lower 2/3 of image
         y_mean = (y1 + y2) / 2.0
-        y_pos_norm = y_mean / float(H)
         
-        # Boost score for edges in the "user zone" (bottom portion)
-        user_zone_bonus = 1.0 if y_mean > user_zone_start else 0.5
-
-        # Width coverage: user-facing edges often span significant width
-        width_coverage = length / float(W)
-        width_bonus = min(1.0, width_coverage * 2)  # Bonus for wider edges
-
-        # Edge strength: sample points along the segment
-        strength = sample_edge_strength(user_zone_edges, (x1, y1), (x2, y2))
-        strength_norm = strength / 255.0
-
-        # Horizontal continuity: check if edge extends across significant width
-        x_span = abs(x2 - x1) / float(W)
-        continuity_bonus = min(1.0, x_span * 1.5)
-
-        # Enhanced composite score for user-facing edge detection
-        score = (0.35 * length_norm + 
-                0.25 * y_pos_norm + 
-                0.15 * strength_norm + 
-                0.15 * continuity_bonus +
-                0.10 * width_bonus) * user_zone_bonus
+        # New robust scoring: heavily rewards length, but only if line is in lower half
+        # Lines in top half get massive penalty (camera angle independent)
+        position_bonus = 1.0 if y_mean > H / 2 else 0.1
+        
+        # The new score is simpler and more robust to angles
+        # Prioritizes longest, most prominent edges in lower half
+        score = length * position_bonus
 
         if score > best_score:
             best_score = score
@@ -99,7 +82,9 @@ def detect_straight_edge(img_bgr: np.ndarray,
         metadata={
             "angle_tolerance_deg": angle_tolerance_deg,
             "min_line_len_ratio": min_line_len_ratio,
-            "user_facing_zone": user_facing_zone
+            "user_facing_zone": user_facing_zone,
+            "flexible_angle_support": True,
+            "robust_scoring": True
         }
     )
 
@@ -121,17 +106,9 @@ def detect_curved_edge(img_bgr: np.ndarray,
     y0 = int(H * (1 - bottom_mask_ratio))
     mask[y0:H, :] = 255
     
-    # Additional central bias - user typically sits in front of desk center
-    center_bias_mask = np.zeros_like(edges)
-    center_x = W // 2
-    center_width = int(W * 0.8)  # Focus on central 80% of image width
-    x_start = max(0, center_x - center_width // 2)
-    x_end = min(W, center_x + center_width // 2)
-    center_bias_mask[:, x_start:x_end] = 255
-    
-    # Combine masks
-    combined_mask = cv2.bitwise_and(mask, center_bias_mask)
-    masked_edges = cv2.bitwise_and(edges, combined_mask)
+    # Remove central bias assumption for variable camera angles
+    # Use full width to accommodate side/angled views
+    masked_edges = cv2.bitwise_and(edges, mask)
 
     # Enhanced morphology to better connect desk edge segments
     kernel_close = np.ones((7,7), np.uint8)  # Larger kernel for better connection
@@ -159,10 +136,9 @@ def detect_curved_edge(img_bgr: np.ndarray,
         # Vertical position: prefer lower edges (user-facing)
         y_bottom = (y + h) / float(H)
         
-        # Horizontal span: user-facing edges often span significant width
-        x_center = (x + w/2) / float(W)
-        center_distance = abs(x_center - 0.5)  # Distance from image center
-        center_score = 1.0 - center_distance  # Higher score for more centered edges
+        # Remove center bias - edges can be anywhere in frame for angled views
+        # Focus on width coverage instead of central positioning
+        width_coverage_score = min(1.0, width_norm * 2.0)
         
         # Aspect ratio: user-facing edges tend to be wider than tall
         aspect_ratio = w / max(h, 1)
@@ -172,12 +148,13 @@ def detect_curved_edge(img_bgr: np.ndarray,
         area = cv2.contourArea(cnt)
         area_norm = area / (W * H * bottom_mask_ratio)
         
-        # Enhanced composite score for user-facing curved edges
-        score = (0.30 * width_norm +           # Width coverage
-                0.25 * y_bottom +              # Lower position
-                0.20 * center_score +          # Central positioning  
-                0.15 * aspect_score +          # Wide aspect ratio
-                0.10 * min(1.0, area_norm * 10))  # Reasonable area
+        # Enhanced composite score for variable camera angles
+        # Prioritize lower position and width coverage over central bias
+        score = (0.35 * width_norm +           # Width coverage (increased weight)
+                0.30 * y_bottom +              # Lower position (increased weight)
+                0.20 * width_coverage_score +  # Width coverage bonus
+                0.10 * aspect_score +          # Wide aspect ratio
+                0.05 * min(1.0, area_norm * 10))  # Reasonable area
 
         if score > best_score:
             best_score = score
@@ -224,7 +201,8 @@ def detect_curved_edge(img_bgr: np.ndarray,
             "bottom_mask_ratio": bottom_mask_ratio,
             "approx_eps_ratio": approx_eps_ratio,
             "resample_points": resample_points,
-            "center_bias_applied": True
+            "center_bias_applied": False,
+            "variable_angle_support": True
         }
     )
 
