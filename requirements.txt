@@ -1,0 +1,13 @@
+pandas
+numpy
+matplotlib
+seaborn
+scikit-learn
+ipykernel
+streamlit
+opencv-python-headless
+numpy
+Pillow
+scikit-image
+plotly
+opencv-python
