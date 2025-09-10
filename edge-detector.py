@@ -36,12 +36,16 @@ with st.sidebar:
     
     st.subheader("📐 Edge Detection")
     use_clahe = st.checkbox("Use CLAHE (contrast boost)", value=True)
+    resize_image = st.checkbox("Resize image to max width 1280px", value=True, 
+                              help="Resize large images for faster processing. Uncheck to keep original size.")
     min_line_len_ratio = st.slider("Min line length (ratio of width)", 0.05, 0.6, 0.25, 0.05)
     angle_tol = st.slider("Angle tolerance (deg)", 10, 80, 60, 5, 
                          help="Higher values allow detection of diagonal desk edges from angled camera views")
     bottom_mask_ratio = st.slider("User-facing zone (bottom ratio)", 0.4, 0.9, 0.7, 0.05)
     approx_eps_ratio = st.slider("Contour smoothing (eps ratio)", 0.003, 0.05, 0.008, 0.001)
     resample_points = st.slider("Curve detail points", 8, 200, 35, 1)
+    boundary_margin = st.slider("Boundary margin (ignore edge ratio)", 0.01, 0.15, 0.05, 0.01, 
+                               help="Ignore edges within this ratio of image boundaries to filter out image frame artifacts")
 
     st.header("Debug Views")
     show_gray = st.checkbox("Show grayscale", value=True)
@@ -54,7 +58,8 @@ uploaded = st.file_uploader("Upload an office desk image (PNG/JPG/WEBP)", type=[
 if uploaded:
     image = Image.open(uploaded).convert("RGB")
     img_bgr = pil_to_cv(image)
-    img_bgr = resize_max_width(img_bgr, 1280)
+    if resize_image:
+        img_bgr = resize_max_width(img_bgr, 1280)
 
     gray, blurred, edges, debug = preprocess_for_edges(img_bgr, use_clahe=use_clahe, use_segmentation=use_segmentation)
 
@@ -63,17 +68,25 @@ if uploaded:
         img_bgr, edges,
         min_line_len_ratio=min_line_len_ratio,
         angle_tolerance_deg=angle_tol,
-        user_facing_zone=0.6  # Focus on bottom 60% for user-facing edges
+        user_facing_zone=0.6,  # Focus on bottom 60% for user-facing edges
+        boundary_margin=boundary_margin
     )
+
+    st.write(f"Straight edge detection result: {straight_res}")
 
     curved_res = detect_curved_edge(
         img_bgr, edges,
         bottom_mask_ratio=bottom_mask_ratio,
         approx_eps_ratio=approx_eps_ratio,
-        resample_points=resample_points
+        resample_points=resample_points,
+        boundary_margin=boundary_margin
     )
 
+    st.write(f"Curved edge detection result: {curved_res}")
+    
     result = choose_best_edge(straight_res, curved_res)
+
+    st.write(f"Best edge detection result: {result}")
 
     col1, col2 = st.columns([2,1])
 
@@ -125,10 +138,20 @@ if uploaded:
             overlay = img_bgr.copy()
             H, W = img_bgr.shape[:2]
             
+            # Calculate boundary margins
+            margin_x = int(W * boundary_margin)
+            margin_y = int(H * boundary_margin)
+            
             # Match the user_facing_zone parameter
             user_zone_start = int(H * (1 - 0.6))
             user_zone_edges = edges.copy()
             user_zone_edges[:user_zone_start, :] = 0
+            
+            # Apply boundary filtering
+            user_zone_edges[:, :margin_x] = 0  # Left boundary
+            user_zone_edges[:, W-margin_x:] = 0  # Right boundary
+            user_zone_edges[:margin_y, :] = 0  # Top boundary
+            user_zone_edges[H-margin_y:, :] = 0  # Bottom boundary
             
             lines = cv2.HoughLinesP(user_zone_edges, 1, np.pi/180, 50,
                                     minLineLength=max(20, int(min_line_len_ratio * W)),
@@ -144,28 +167,34 @@ if uploaded:
             
             # Draw user zone boundary
             cv2.line(overlay, (0, user_zone_start), (W, user_zone_start), (255, 255, 0), 2)
-            st.image(cv_to_rgb(overlay), caption="User-Facing Zone Hough Lines (Green=Candidates)", use_container_width=True)
+            # Draw boundary margins
+            cv2.rectangle(overlay, (0, 0), (margin_x, H), (255, 0, 255), 2)  # Left margin
+            cv2.rectangle(overlay, (W-margin_x, 0), (W, H), (255, 0, 255), 2)  # Right margin
+            cv2.rectangle(overlay, (0, 0), (W, margin_y), (255, 0, 255), 2)  # Top margin
+            cv2.rectangle(overlay, (0, H-margin_y), (W, H), (255, 0, 255), 2)  # Bottom margin
+            st.image(cv_to_rgb(overlay), caption="User-Facing Zone Hough Lines (Green=Candidates, Magenta=Boundary Margins)", use_container_width=True)
 
         # Debug overlay for contours
         if show_contour_overlay:
             H, W = edges.shape[:2]
+            
+            # Calculate boundary margins
+            margin_x = int(W * boundary_margin)
+            margin_y = int(H * boundary_margin)
             
             # Create masks for user-facing zone
             mask = np.zeros_like(edges)
             y0 = int(H * (1 - bottom_mask_ratio))
             mask[y0:H, :] = 255
             
-            # Center bias mask
-            center_bias_mask = np.zeros_like(edges)
-            center_x = W // 2
-            center_width = int(W * 0.8)
-            x_start = max(0, center_x - center_width // 2)
-            x_end = min(W, center_x + center_width // 2)
-            center_bias_mask[:, x_start:x_end] = 255
+            # Apply boundary filtering
+            mask[:, :margin_x] = 0  # Left boundary
+            mask[:, W-margin_x:] = 0  # Right boundary
+            mask[:margin_y, :] = 0  # Top boundary
+            mask[H-margin_y:, :] = 0  # Bottom boundary
             
-            # Combine masks and apply morphology
-            combined_mask = cv2.bitwise_and(mask, center_bias_mask)
-            masked_edges = cv2.bitwise_and(edges, combined_mask)
+            # Apply mask and morphology
+            masked_edges = cv2.bitwise_and(edges, mask)
             
             # Morphological operations
             kernel_close = np.ones((7,7), np.uint8)
@@ -186,10 +215,13 @@ if uploaded:
             
             # Draw zone boundaries
             cv2.line(overlay2, (0, y0), (W, y0), (255, 255, 0), 2)  # Bottom zone
-            cv2.line(overlay2, (x_start, 0), (x_start, H), (255, 0, 255), 1)  # Center bias left
-            cv2.line(overlay2, (x_end, 0), (x_end, H), (255, 0, 255), 1)  # Center bias right
+            # Draw boundary margins
+            cv2.rectangle(overlay2, (0, 0), (margin_x, H), (255, 0, 255), 2)  # Left margin
+            cv2.rectangle(overlay2, (W-margin_x, 0), (W, H), (255, 0, 255), 2)  # Right margin
+            cv2.rectangle(overlay2, (0, 0), (W, margin_y), (255, 0, 255), 2)  # Top margin
+            cv2.rectangle(overlay2, (0, H-margin_y), (W, H), (255, 0, 255), 2)  # Bottom margin
 
-            st.image(cv_to_rgb(overlay2), caption="User-Facing Contours (Green=Candidates, Yellow=Zone)", use_container_width=True)
+            st.image(cv_to_rgb(overlay2), caption="User-Facing Contours (Green=Candidates, Yellow=Zone, Magenta=Boundary Margins)", use_container_width=True)
 
 else:
     st.info("Upload an image to begin. Use the sidebar to tune detection parameters.")

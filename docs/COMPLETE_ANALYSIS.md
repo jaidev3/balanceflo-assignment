@@ -77,9 +77,11 @@ The app uses **two complementary algorithms**:
 - **Purpose**: Finds linear desk edges
 - **Process**:
   1. Focus on bottom 60% of image (user-facing zone)
-  2. Apply Hough line detection
-  3. Filter by angle tolerance (configurable)
-  4. Score by length and position
+  2. Apply boundary filtering to ignore image frame edges
+  3. Apply Hough line detection
+  4. Filter by angle tolerance (configurable)
+  5. Additional boundary filtering on detected lines
+  6. Score by length and position
 - **Best for**: Rectangular desks, clear linear edges
 
 #### **B. Curved Edge Detection (`detect_curved_edge()`)**
@@ -88,10 +90,12 @@ The app uses **two complementary algorithms**:
 - **Purpose**: Finds curved or irregular desk edges
 - **Process**:
   1. Focus on bottom portion of image
-  2. Apply morphological closing/dilation
-  3. Find contours
-  4. Extract "user-facing envelope" (max Y for each X)
-  5. Resample to fixed number of points
+  2. Apply boundary filtering to ignore image frame edges
+  3. Apply morphological closing/dilation
+  4. Find contours
+  5. Filter contours too close to image boundaries
+  6. Extract "user-facing envelope" (max Y for each X)
+  7. Resample to fixed number of points
 - **Best for**: Rounded desks, complex shapes
 
 #### **C. Edge Selection (`choose_best_edge()`)**
@@ -134,6 +138,7 @@ class EdgeResult:
 - **Min Line Length**: Minimum length for straight edges
 - **Angle Tolerance**: How diagonal edges can be (10-80°)
 - **User-Facing Zone**: Focus area (40-90% from bottom)
+- **Boundary Margin**: Ignore edges near image borders (1-15%)
 - **Contour Smoothing**: How much to smooth curved edges
 - **Curve Detail**: Number of points in curved edges (8-200)
 
@@ -143,17 +148,19 @@ The app provides extensive debugging visualizations:
 
 - **Grayscale view** - Preprocessed image
 - **Canny edges** - Raw edge detection
-- **Hough lines overlay** - Shows detected straight lines
-- **Contour overlay** - Shows detected curved contours
+- **Hough lines overlay** - Shows detected straight lines with boundary margins
+- **Contour overlay** - Shows detected curved contours with filtering zones
 - **AI segmentation** - Shows person/chair detection mask
+- **Boundary visualization** - Magenta rectangles show ignored boundary regions
 
 ## 💡 **Key Innovations**
 
 1. **AI-Enhanced Preprocessing**: Removes people/chairs that would confuse edge detection
 2. **Dual Algorithm Approach**: Handles both straight and curved desk edges
-3. **User-Facing Focus**: Prioritizes edges closest to the camera/user
-4. **Flexible Camera Angles**: Works with various viewing angles
-5. **Real-time Tuning**: Interactive parameters for different scenarios
+3. **Smart Boundary Filtering**: Automatically ignores image frame artifacts and border effects
+4. **User-Facing Focus**: Prioritizes edges closest to the camera/user
+5. **Flexible Camera Angles**: Works with various viewing angles
+6. **Real-time Tuning**: Interactive parameters for different scenarios
 
 ## 📊 **Application Flow Diagram**
 

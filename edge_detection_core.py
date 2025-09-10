@@ -21,20 +21,32 @@ def detect_straight_edge(img_bgr: np.ndarray,
                          edges: np.ndarray,
                          min_line_len_ratio: float = 0.2,
                          angle_tolerance_deg: float = 60.0,
-                         user_facing_zone: float = 0.6
+                         user_facing_zone: float = 0.6,
+                         boundary_margin: float = 0.05
                          ) -> Optional[EdgeResult]:
     """
     Use Probabilistic Hough to find near-horizontal long segments that represent
     the user-facing desk edge. Focus on bottom portion of image.
+    Filters out edges too close to image boundaries.
     Returns best EdgeResult or None.
     """
     H, W = edges.shape[:2]
     min_line_len = max(20, int(min_line_len_ratio * W))
 
+    # Calculate boundary margins to ignore image edge artifacts
+    margin_x = int(W * boundary_margin)
+    margin_y = int(H * boundary_margin)
+
     # Focus on user-facing zone (bottom portion of image)
     user_zone_start = int(H * (1 - user_facing_zone))
     user_zone_edges = edges.copy()
     user_zone_edges[:user_zone_start, :] = 0  # Zero out upper portion
+    
+    # Zero out boundary regions to ignore image edge artifacts
+    user_zone_edges[:, :margin_x] = 0  # Left boundary
+    user_zone_edges[:, W-margin_x:] = 0  # Right boundary
+    user_zone_edges[:margin_y, :] = 0  # Top boundary
+    user_zone_edges[H-margin_y:, :] = 0  # Bottom boundary
 
     lines = cv2.HoughLinesP(user_zone_edges, rho=1, theta=np.pi/180, threshold=50,
                             minLineLength=min_line_len, maxLineGap=30)
@@ -47,6 +59,12 @@ def detect_straight_edge(img_bgr: np.ndarray,
 
     for line in lines:
         x1, y1, x2, y2 = line[0]
+        
+        # Additional boundary filtering: reject lines too close to image edges
+        if (x1 <= margin_x or x1 >= W - margin_x or x2 <= margin_x or x2 >= W - margin_x or
+            y1 <= margin_y or y1 >= H - margin_y or y2 <= margin_y or y2 >= H - margin_y):
+            continue
+        
         dx, dy = (x2 - x1), (y2 - y1)
         angle = np.degrees(np.arctan2(dy, dx))
         
@@ -83,8 +101,10 @@ def detect_straight_edge(img_bgr: np.ndarray,
             "angle_tolerance_deg": angle_tolerance_deg,
             "min_line_len_ratio": min_line_len_ratio,
             "user_facing_zone": user_facing_zone,
+            "boundary_margin": boundary_margin,
             "flexible_angle_support": True,
-            "robust_scoring": True
+            "robust_scoring": True,
+            "boundary_filtering": True
         }
     )
 
@@ -93,18 +113,30 @@ def detect_curved_edge(img_bgr: np.ndarray,
                        edges: np.ndarray,
                        bottom_mask_ratio: float = 0.65,
                        approx_eps_ratio: float = 0.01,
-                       resample_points: int = 40) -> Optional[EdgeResult]:
+                       resample_points: int = 40,
+                       boundary_margin: float = 0.05) -> Optional[EdgeResult]:
     """
     Focus on bottom region to find curved user-facing desk edges.
     Extract the frontmost envelope (max y by x) representing the user-side edge.
+    Filters out edges too close to image boundaries.
     Returns best EdgeResult or None.
     """
     H, W = edges.shape[:2]
+
+    # Calculate boundary margins to ignore image edge artifacts
+    margin_x = int(W * boundary_margin)
+    margin_y = int(H * boundary_margin)
 
     # Enhanced mask for user-facing zone (bottom portion)
     mask = np.zeros_like(edges)
     y0 = int(H * (1 - bottom_mask_ratio))
     mask[y0:H, :] = 255
+    
+    # Zero out boundary regions to ignore image edge artifacts
+    mask[:, :margin_x] = 0  # Left boundary
+    mask[:, W-margin_x:] = 0  # Right boundary
+    mask[:margin_y, :] = 0  # Top boundary
+    mask[H-margin_y:, :] = 0  # Bottom boundary
     
     # Remove central bias assumption for variable camera angles
     # Use full width to accommodate side/angled views
@@ -128,6 +160,11 @@ def detect_curved_edge(img_bgr: np.ndarray,
         
         # Filter out very small contours
         if w < W * 0.15 or h < 5:  # Must be reasonably wide and tall
+            continue
+        
+        # Additional boundary filtering: reject contours too close to image edges
+        if (x <= margin_x or x + w >= W - margin_x or 
+            y <= margin_y or y + h >= H - margin_y):
             continue
             
         width_norm = w / float(W)
@@ -201,8 +238,10 @@ def detect_curved_edge(img_bgr: np.ndarray,
             "bottom_mask_ratio": bottom_mask_ratio,
             "approx_eps_ratio": approx_eps_ratio,
             "resample_points": resample_points,
+            "boundary_margin": boundary_margin,
             "center_bias_applied": False,
-            "variable_angle_support": True
+            "variable_angle_support": True,
+            "boundary_filtering": True
         }
     )
 
