@@ -1,4 +1,4 @@
-# Enhanced Desk Edge Detection App - Flow Diagram
+# Desk Edge Detection App - Flow Diagram
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐

@@ -22,12 +22,12 @@ from edge_detection_core import (
 # =========================
 # Streamlit UI
 # =========================
-st.set_page_config(page_title="Enhanced Desk Edge Detector", page_icon="🧭", layout="wide")
-st.title("🧭 Enhanced Desk Edge Detection")
+st.set_page_config(page_title="Desk Edge Detector", page_icon="🧭", layout="wide")
+st.title("🧭 Desk Edge Detection")
 st.caption("AI-powered desk edge detection that works with people in the scene and various camera angles. Uses semantic segmentation to remove person/chair noise and flexible algorithms for robust detection.")
 
 with st.sidebar:
-    st.header("Enhanced Edge Detection Settings")
+    st.header("Edge Detection Settings")
     st.caption("Robust detection for various camera angles and scenes with people")
     
     st.subheader("🤖 AI Enhancement")
